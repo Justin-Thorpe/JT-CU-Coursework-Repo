@@ -1,0 +1,283 @@
+---
+title: "COVID 19 Data"
+output: html_document
+date: "2024-10-09"
+---
+
+```{r setup}
+
+```
+For this analysis I am looking at the Johns Hopkins data set on COVID 19, available on [github here](https://github.com/CSSEGISandData/COVID-19). I will use this data to understand the relationship between number of infections and number of deaths over time, specifically in the most populous US states, and in the most populous countries. 
+
+First I will import the libraries I will be using for this analysis. 
+```{r library_setup, include=TRUE}
+library(tidyverse)
+library(lubridate)
+```
+
+Next I will import the data set from github, and read in the CSV files.
+```{r data_setup}
+#this is the URL to the data set in Github
+url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/refs/heads/master/csse_covid_19_data/csse_covid_19_time_series/"
+
+#these are the CSV files
+file_names <-
+  c("time_series_covid19_confirmed_US.csv",
+    "time_series_covid19_confirmed_global.csv",
+    "time_series_covid19_deaths_US.csv",
+    "time_series_covid19_deaths_global.csv")
+
+#Concatenates the URL name and file name
+urls <- str_c(url_in, file_names)
+
+#Read in files
+US_cases <- read.csv(urls[1])
+global_cases <- read.csv(urls[2])
+US_deaths <- read.csv(urls[3])
+global_deaths <- read.csv(urls[4])
+
+#this functions are to append to the global data frames in a future step.
+global_populations <- read.csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/refs/heads/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv")
+```
+
+Here I will clean the data for analysis, as well as ensure each column is the correct data type.
+```{r tidy_data}
+#These functions are for pivoting the data in a more usable way
+global_cases <- global_cases %>%
+    pivot_longer(cols = -c('Province.State',
+                           'Country.Region',
+                           Lat, Long),
+                 names_to = "date",
+                 values_to = "cases") %>%
+    select(-c(Lat, Long))
+
+
+global_deaths <- global_deaths %>%
+    pivot_longer(cols = -c('Province.State',
+                           'Country.Region',
+                           Lat, Long),
+                 names_to = "date",
+                 values_to = "deaths") %>%
+    select(-c(Lat, Long))
+
+US_cases <- US_cases %>%
+    select(-c(UID, iso2, iso3, code3, FIPS, Admin2, Combined_Key)) %>%
+    pivot_longer(cols = -c('Province_State',
+                           'Country_Region',
+                           Lat, Long_),
+                 names_to = "date",
+                 values_to = "cases") %>%
+    select(-c(Lat, Long_))
+
+US_deaths <- US_deaths %>%
+    select(-c(UID, iso2, iso3, code3, FIPS, Combined_Key)) %>%
+    pivot_longer(cols = -c('Province_State',
+                           'Country_Region',
+                           'Admin2',
+                           'Population',
+                           Lat, Long_),
+                 names_to = "date",
+                 values_to = "deaths") %>%
+    select(-c(Lat, Long_))
+
+#These functions will reformat the date column, and remove the 'X' in front.
+
+global_cases <- global_cases %>%
+    mutate(date = mdy(gsub("X", "", as.character(date))))
+global_deaths <- global_deaths %>%
+    mutate(date = mdy(gsub("X", "", as.character(date))))
+US_cases <- US_cases %>%
+    mutate(date = mdy(gsub("X", "", as.character(date))))
+US_deaths <- US_deaths %>%
+    mutate(date = mdy(gsub("X", "", as.character(date))))
+```
+
+Now I will join the global cases table with global deaths. As well as join the US cases and US deaths tables.
+I will also filter out any items where the data in cases is 0.
+```{r data_joins}
+#this is to join the global data sets
+global_data <- global_cases %>%
+    full_join(global_deaths) %>%
+    rename(Country_Region = 'Country.Region',
+           Province_State = 'Province.State') %>%
+    filter(cases > 0) %>% #I only want to see instances where the cases are greater than 0
+    mutate(across(c(Country_Region, Province_State), ~ na_if(., ""))) #changes "" to NA in data
+
+#this is to join the US data sets
+US_data <- US_cases %>%
+    full_join(US_deaths) %>%
+    rename(Country_Region = 'Country_Region',
+           Province_State = 'Province_State') %>%
+    filter(cases > 0) %>% #I only want to see instances where the cases are greater than 0
+    mutate(across(c(Country_Region, Province_State), ~ na_if(., ""))) #changes "" to NA in data
+
+```
+
+Here I will join the global populations into the global data. Then after I will add the US data.
+```{r population}
+#this is to create the same key as found in the populations data frame so I can do a join
+global_data <- global_data %>%
+  unite("Combined_Key",
+        c(Province_State, Country_Region),
+        sep = ", ",
+        na.rm = TRUE,
+        remove = FALSE)
+
+#this is to clean the global populations data before join
+global_populations <- global_populations %>% 
+    mutate(across(c(Country_Region, Province_State), ~ na_if(., ""))) %>% #changes "" to NA in data
+    unite("Combined_Key", c(Province_State, Country_Region), sep = ", ", na.rm = TRUE, remove = FALSE) %>%
+    select(-Country_Region, -Province_State)
+
+#this adds the population metric to the global data
+global_data <- global_data %>%
+  left_join(global_populations, by = "Combined_Key") %>%
+  select(-c(UID, FIPS)) %>%
+  select(Combined_Key, Province_State, Country_Region, date, cases, deaths, Population)
+
+
+```
+
+Now I can begin the analysis with visualization. This first visualization will show the total number of COVID 19 deaths and cases over time in the USA.
+```{r US_plots_total}
+#This creates a new data frame so we can view by state
+US_by_state <- US_data %>%
+  select(-c(Admin2)) %>%
+  group_by(Province_State, Country_Region, date) %>%
+  summarize(cases = sum(cases, na.rm = TRUE),
+            deaths = sum(deaths, na.rm = TRUE),
+            population = sum(Population, na.rm = TRUE)) %>%
+  mutate(deaths_per_million = (deaths * 1000000) / population) %>%
+  select(Province_State, Country_Region, date, cases, deaths, deaths_per_million, population) %>%
+  ungroup()
+
+#this will create a data frame will show the entire USA over time
+US_totals <- US_by_state %>% 
+  group_by(Country_Region, date) %>%
+  summarize(cases = sum(cases, na.rm = TRUE),
+            deaths = sum(deaths, na.rm = TRUE),
+            population = sum(population, na.rm = TRUE)) %>%
+  mutate(deaths_per_million = (deaths * 1000000) / population) %>%
+  select(Country_Region, date, cases, deaths, deaths_per_million, population) %>%
+  ungroup()
+
+#This plots the US cases and deaths on a logarithmic scale
+US_totals %>%
+    ggplot(aes(x = date, y = cases)) +
+    geom_line(aes(color = "Cases")) +
+    geom_point(aes(color = "Cases")) +
+    geom_line(aes(y = deaths, color = "Deaths")) +
+    geom_point(aes(y = deaths, color = "Deaths")) +
+    scale_y_log10() +
+    scale_color_discrete(name = "COVID Metrics") +
+    theme(legend.position = "right",
+          axis.text.x = element_text(angle = 90)) +
+    labs(title = "COVID 19 in the US Over Time", x = "Date", y = "Cases and Deaths (log)")
+
+```
+
+This next plot is just for the top 10 states by population, showing how many cases they each had, and the total deaths overlayed across. 
+```{r US_plot_top_10}
+#creates a value with the 10 highest pop states
+top_10_states <- US_by_state %>%
+  group_by(Province_State) %>%
+  summarize(population = max(population)) %>%
+  arrange(desc(population)) %>%
+  slice(1:10) %>%
+  pull(Province_State)
+#creates a new data frame so we can use in analysis
+US_top_10 <- US_by_state %>%
+  filter(Province_State %in% top_10_states)
+
+ggplot(US_top_10, aes(x = date, y = cases, color = Province_State)) +
+  geom_line() + 
+  geom_point() +  
+  scale_y_log10() +  
+  theme(legend.position = "right",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = "COVID-19 Cases Over Time in Top 10 States by Population", 
+       x = "Date", 
+       y = "Number of Cases (log scale)", 
+       color = "State") +  
+  geom_line(data = US_totals %>% 
+              group_by(date) %>% 
+              summarize(total_deaths = sum(deaths)), 
+            aes(x = date, y = total_deaths), 
+            inherit.aes = FALSE, color = "red", linetype = "dashed") +
+ # Add labels for total deaths
+  labs(color = "States", 
+       subtitle = "Dashed line represents total deaths across these states")
+```
+
+Above we can see, similarly to the total US population, the number of deaths from COVID trails just behind the number of cases. Next I will plot the top 10 countries by population.
+```{r GLOBAL_plot_top_10}
+#summarizes global data by country
+global_by_country <- global_data %>%
+  group_by(Country_Region, date) %>%
+  summarize(cases = sum(cases, na.rm = TRUE),
+            deaths = sum(deaths, na.rm = TRUE),
+            population = sum(Population, na.rm = TRUE)) %>%
+  mutate(deaths_per_million = (deaths * 1000000) / population) %>%
+  select(Country_Region, date, cases, deaths, deaths_per_million, population) %>%
+  ungroup()
+
+#creates a value with the 10 highest pop countries
+top_10_countries <- global_by_country %>%
+  group_by(Country_Region) %>%
+  summarize(population = max(population)) %>%
+  arrange(desc(population)) %>%
+  slice(1:10) %>%
+  pull(Country_Region)
+
+#creates a new data frame so we can use in analysis
+global_top_10 <- global_by_country %>%
+  filter(Country_Region %in% top_10_countries)
+
+#this is to have the total deaths per day globally
+global_totals <- global_top_10 %>%
+  group_by(date) %>%
+  summarize(total_deaths = sum(deaths, na.rm = TRUE))
+
+ggplot(global_top_10, aes(x = date, y = cases, color = Country_Region)) +
+  geom_line() + 
+  geom_point() +  
+  scale_y_log10() +  
+  theme(legend.position = "right",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = "COVID-19 Cases Over Time in Top 10 Countries by Population", 
+       x = "Date", 
+       y = "Number of Cases (log scale)", 
+       color = "Country") +  
+  geom_line(data = global_totals, 
+            aes(x = date, y = total_deaths), 
+            inherit.aes = FALSE, color = "red", linetype = "dashed") +
+  # Adds labels for the dashed line representing total deaths
+  labs(color = "Countries", 
+       subtitle = "Dashed line represents total deaths across these countries")
+```
+We can see the same trends as before, total deaths follows very closely with infections. Next I will model an infection to death ratio to view over time.
+```{r inf_death_ratio}
+global_top_10 <- global_top_10 %>%
+  mutate(CFR = (deaths / cases) * 100) #this is a infection to death ratio each day
+
+ggplot(global_top_10, aes(x = date, y = CFR, color = Country_Region)) +
+  geom_line() + 
+  geom_point() +  
+  theme(legend.position = "right",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = "COVID-19 Case Fatality Rate (CFR) Over Time in Top 10 Countries", 
+       x = "Date", 
+       y = "CFR (%)", 
+       color = "Country") +
+  scale_y_continuous(labels = scales::percent_format(scale = 1))
+
+```
+
+This model shows that over time there was a large increase in the case fatalities initially, with a slow leveling off for the remaining several years. 
+
+I can conclude that over the course of COVID 19, infections rose quickly but eventually leveled off, meanwhile the fatality rate actually decreased over time. I would need more data to make any assumptions about vaccination rates to add that to a model. 
+
+Some biases I can make out with this data are as follows:
+1. Testing bias and the under reporting of cases. Not all countries reported uniformly, and the capacity for accurate testing was limited. So we may never know the true number  of cases.
+2. Attribution bias, where deaths were reported as being due to COVID-19 even if it may have been another cause. This could have inflated the fatality rate. Only by retroactively going through cases would you be able to better attribute the deaths.
+3. Geographic bias since there are more people in cities, thus it can be easy to assume developed nations and places with more urban density would be over represented than in rural communities.
